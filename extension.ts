@@ -190,14 +190,24 @@ const PARTS: unique symbol = Symbol.for("pi-galley.parts.v1");
 const REGION_ROOT: unique symbol = Symbol.for("pi-galley.region-root.v1");
 const REGION: unique symbol = Symbol.for("pi-galley.region.v1");
 
+// Public contract for other extensions (see README, "For extension authors").
+/** Set to true on a rendered component to keep its transcript block full width. */
+const FULL_WIDTH: unique symbol = Symbol.for("pi-galley.full-width");
+/** A function on globalThis returning the measure in cells, or 0 when the galley is off. */
+const MEASURE: unique symbol = Symbol.for("pi-galley.measure");
+
 /** A Pi component plus the bookkeeping this extension attaches to it. */
 interface Hooked extends Component {
   children?: Hooked[];
+  child?: Hooked;
   [HOOKED]?: true;
   [PARTS]?: { key: string; parts: Part[] | null };
   [REGION_ROOT]?: Region;
   [REGION]?: Region;
+  [FULL_WIDTH]?: boolean;
 }
+
+const published = globalThis as { [MEASURE]?: () => number };
 
 const shared = globalThis as { [STATE]?: { impl?: Impl; tui?: TUI } };
 shared[STATE] ??= {};
@@ -397,9 +407,30 @@ function regionOf(comp: Hooked): Region | undefined {
   return comp[REGION];
 }
 
+/**
+ * How deep to look for a FULL_WIDTH mark. A tool renderer's output sits four levels
+ * down: tool component, render container, MouseRegion, then the renderer's root.
+ */
+const MARK_DEPTH = 6;
+
+/** Containers hold `children`; single-child wrappers such as MouseRegion hold a private `child`. */
+const innerOf = (comp: Hooked): Hooked[] =>
+  comp.child ? [comp.child] : (comp.children ?? []);
+
+function isMarkedFullWidth(comp: Hooked, depth = MARK_DEPTH): boolean {
+  return (
+    comp[FULL_WIDTH] === true ||
+    (depth > 0 &&
+      innerOf(comp).some((inner) => isMarkedFullWidth(inner, depth - 1)))
+  );
+}
+
 function isFullWidth(comp: Hooked): boolean {
   const region = regionOf(comp);
-  return region !== undefined && config[region] === "full";
+  return (
+    (region !== undefined && config[region] === "full") ||
+    isMarkedFullWidth(comp)
+  );
 }
 
 /** Pi's renderers expose the focused component; the TUI interface does not declare it. */
@@ -450,6 +481,8 @@ const impl: Impl = {
   },
 };
 
+const measure = () => config.measure;
+
 // ---------- Extension ----------
 
 export default function (pi: ExtensionAPI) {
@@ -476,6 +509,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setWidget("__pi-galley", undefined);
     tagRegions(state.tui);
     state.impl = impl;
+    published[MEASURE] = measure;
     for (const child of state.tui?.children ?? []) hook(child);
     state.tui?.requestRender(true);
   });
@@ -483,6 +517,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     if (state.impl !== impl) return; // a newer load already took over
     state.impl = undefined;
+    if (published[MEASURE] === measure) delete published[MEASURE];
     try {
       state.tui?.requestRender(true);
     } catch {}

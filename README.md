@@ -49,6 +49,21 @@ Environment variables override the saved settings for one launch:
 Mermaid diagrams wider than the measure break out to the width they need, so
 Pi can still draw them. The prose around them stays in the galley.
 
+## For extension authors
+
+Extensions can cooperate with pi-galley without depending on it. Both hooks
+use global symbols, so they do nothing when pi-galley is not installed.
+
+- Set `component[Symbol.for("pi-galley.full-width")] = true` on a component
+  your message or tool renderer returns. pi-galley leaves the transcript block
+  that contains it at the full terminal width.
+- Call `globalThis[Symbol.for("pi-galley.measure")]?.()` at render time for the
+  current measure in cells. It returns `0` when the galley is off, and the
+  function is absent when pi-galley is not loaded.
+
+A chat-style extension can combine the two: run its block full width, cap its
+bubbles at the measure, and put them against the left and right edges.
+
 ## Scope and limitations
 
 - Terminals lay text out on a grid of equal-width cells, so pi-galley controls
