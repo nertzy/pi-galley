@@ -56,7 +56,9 @@ class Pi:
         self.stream = pyte.ByteStream(self.screen)
         self.log = open(os.path.join(out_dir, "pty.log"), "wb")
         child_env = {k: v for k, v in os.environ.items() if not k.startswith(("PI_GALLEY_", "HERDR"))}
-        child_env.update({"PI_CODING_AGENT_DIR": agent_dir, "TERM": "xterm-256color", **env})
+        # A dummy key makes the session's model available, so the footer shows it; --offline means no calls.
+        child_env.update({"PI_CODING_AGENT_DIR": agent_dir, "TERM": "xterm-256color",
+                          "ANTHROPIC_API_KEY": "e2e-dummy-key", **env})
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
