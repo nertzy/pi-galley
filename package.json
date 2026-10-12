@@ -1,0 +1,64 @@
+{
+  "name": "pi-galley",
+  "version": "0.1.0",
+  "description": "Set Pi's chat in a readable measure on wide terminals, with tool output, input, and footer free to run full width",
+  "type": "module",
+  "license": "MIT",
+  "author": "Grant Hutchins",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nertzy/pi-galley.git"
+  },
+  "homepage": "https://github.com/nertzy/pi-galley#readme",
+  "bugs": {
+    "url": "https://github.com/nertzy/pi-galley/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "typography",
+    "terminal"
+  ],
+  "files": [
+    "extension.ts",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./extension.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./extension.ts"
+    ]
+  },
+  "scripts": {
+    "test": "e2e/run.sh",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm test && npm run typecheck",
+    "lint": "npm run lint:biome && npm run lint:markdown && actionlint .github/workflows/*.yml",
+    "lint:biome": "biome check .",
+    "lint:markdown": "markdownlint-cli2 \"**/*.md\" \"#node_modules\" \"#tmp\" \"#e2e\"",
+    "lint:fix": "biome check --write . && markdownlint-cli2 --fix \"**/*.md\" \"#node_modules\" \"#tmp\" \"#e2e\"",
+    "pack:check": "node scripts/check-package-contents.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "@types/node": "26.6.5",
+    "markdownlint-cli2": "0.23.3",
+    "typescript": "7.0.2"
+  }
+}
