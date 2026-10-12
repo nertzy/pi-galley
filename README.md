@@ -11,7 +11,7 @@ whole terminal.
 ## Install
 
 ```sh
-pi install git:github.com/nertzy/pi-galley
+pi install npm:pi-galley
 ```
 
 Restart Pi, or run `/reload` in existing sessions.
