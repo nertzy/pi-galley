@@ -36,6 +36,7 @@ import pyte
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXTENSION = os.path.join(HERE, "..", "extension.ts")
+MARKED_EXTENSION = os.path.join(HERE, "marked-message.ts")
 FIXTURE = open(os.path.join(HERE, "fixture.md")).read()
 ARTIFACTS = os.path.join(HERE, "artifacts")
 PAD_X = 1  # Pi's default outputPad: assistant text starts one cell inside the column
@@ -63,7 +64,7 @@ class Pi:
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
             os.chdir(os.path.dirname(session))
-            args = ["pi", "-ne", "-e", EXTENSION, "-ns", "-np", "--offline", "--session", session]
+            args = ["pi", "-ne", "-e", EXTENSION, "-e", MARKED_EXTENSION, "-ns", "-np", "--offline", "--session", session]
             os.execvpe("pi", args, child_env)
         # Answer terminal queries (device attributes, cursor position) like a real terminal.
         self.screen.write_process_input = lambda data: os.write(self.fd, data.encode())
@@ -130,7 +131,7 @@ def make_agent_dir(root: str, tui_mode: str, mermaid: str) -> str:
     return agent
 
 
-def make_session(root: str, tool_call: bool = False) -> str:
+def make_session(root: str, tool_call: bool = False, marked: bool = False) -> str:
     work = os.path.join(root, "work")
     os.makedirs(work, exist_ok=True)
     now_ms = int(time.time() * 1000)
@@ -153,6 +154,19 @@ def make_session(root: str, tool_call: bool = False) -> str:
     for i, message in enumerate(messages, 1):
         entries.append({"type": "message", "id": f"a{i:07d}", "parentId": f"a{i - 1:07d}" if i > 1 else None,
                         "timestamp": iso, "message": message})
+    if marked:  # a tool call and a message whose renderers mark FULL_WIDTH (e2e/marked-message.ts)
+        tool = [
+            {"role": "assistant", "content": [{"type": "toolCall", "id": "toolu_mark", "name": "galley_e2e",
+                                               "arguments": {}}],
+             **model, "stopReason": "toolUse", "timestamp": now_ms},
+            {"role": "toolResult", "toolCallId": "toolu_mark", "toolName": "galley_e2e",
+             "content": [{"type": "text", "text": "marked"}], "isError": False, "timestamp": now_ms},
+        ]
+        for message in tool:
+            entries.append({"type": "message", "id": f"m{len(entries):07d}", "parentId": entries[-1]["id"],
+                            "timestamp": iso, "message": message})
+        entries.append({"type": "custom_message", "id": "marked01", "parentId": entries[-1]["id"], "timestamp": iso,
+                        "customType": "galley-e2e", "content": "marked", "display": True})
     path = os.path.join(work, "session.jsonl")
     with open(path, "w") as f:
         f.write("".join(json.dumps(e) + "\n" for e in entries))
@@ -249,13 +263,14 @@ def at_width(cols, max_width, align="center"):
     return lambda lines: start_col(lines, "ALPHA paragraph") == left + PAD_X
 
 
-def scenario(name, *, cols=260, rows=110, tui="fullscreen", mermaid="streaming", env=None, root=None, tool_call=False):
+def scenario(name, *, cols=260, rows=110, tui="fullscreen", mermaid="streaming", env=None, root=None, tool_call=False,
+             marked=False):
     out = os.path.join(ARTIFACTS, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
     root = root or tempfile.mkdtemp(prefix=f"galley-{name}-")
     agent = make_agent_dir(root, tui, mermaid)
-    session = make_session(root, tool_call)
+    session = make_session(root, tool_call, marked)
     shutil.copy(session, os.path.join(out, "session.jsonl"))
     shutil.copy(os.path.join(agent, "settings.json"), os.path.join(out, "settings.json"))
     return Pi(out, agent, session, cols, rows, env or {}), root, agent
@@ -470,6 +485,41 @@ def run_regions(name, *, input_at, footer_at, then=()):
         pi.close()
 
 
+def run_marked(name, *, measure, then=None):
+    """FULL_WIDTH-marked message and tool blocks span the terminal in a centered galley and read the live measure."""
+    env = {**IN_GALLEY, "PI_GALLEY_MEASURE": str(measure), "PI_GALLEY_ALIGN": "center"}
+    pi, _, _ = scenario(name, env=env, marked=True)
+
+    def check(lines, cols, expected):
+        errors = []
+        for tag in ("MARKED", "TOOLMARK"):
+            left = [row_span(line, cols) for line in lines if f"{tag}-LEFT" in line]
+            right = [(row_span(line, cols), line) for line in lines if f"{tag}-RIGHT" in line]
+            if len(left) != 1 or left[0][0] > PAD_X:
+                errors.append(f"{tag} left line should start at the terminal edge: {left}")
+            if len(right) != 1 or right[0][0][1] < cols - 1 - PAD_X - 1:
+                errors.append(f"{tag} right line should end at the terminal edge: {[span for span, _ in right]}")
+            elif f"measure={expected}" not in right[0][1]:
+                errors.append(f"{tag} read {right[0][1].split()[-1]!r}, expected measure={expected}")
+        return errors
+
+    try:
+        if not pi.wait_for(lambda lines: any("MARKED-RIGHT" in line for line in lines)):
+            pi.save("timeout")
+            return ["pi never showed the marked message"]
+        pi.save("1-start")
+        errors = check(pi.lines(), pi.cols, measure)
+        if then is not None:
+            pi.send(f"/galley {then}\r")
+            if not pi.wait_for(lambda lines: not check(lines, pi.cols, then), timeout=10):
+                errors.append(f"/galley {then} did not reach the marked block")
+            pi.save(f"2-galley-{then}")
+            errors += [f"after /galley {then}: {e}" for e in check(pi.lines(), pi.cols, then)]
+        return errors
+    finally:
+        pi.close()
+
+
 def run_defaults():
     """No settings at all: measure 120, flush left, tool output, input and footer full width."""
     pi, _, _ = scenario("defaults", tool_call=True)
@@ -513,6 +563,7 @@ def main() -> int:
     results["regions-full"] = run_regions("regions-full", input_at="full", footer_at="full")
     results["regions-column-then-full"] = run_regions(
         "regions-column-then-full", input_at="column", footer_at="column", then=(("input", "full"), ("footer", "full")))
+    results["marked-full-width"] = run_marked("marked-full-width", measure=100, then=80)
     results["mermaid-off-100"] = run_layout("mermaid-off-100", max_width=100, expect_breakout=False, mermaid="off")
     results["narrow-terminal-90"] = run_layout("narrow-terminal-90", max_width=100, expect_breakout=False, cols=90)
     errors, root = run_live_change_and_reload()

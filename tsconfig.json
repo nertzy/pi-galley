@@ -9,5 +9,5 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["extension.ts"]
+  "include": ["extension.ts", "e2e/*.ts"]
 }
