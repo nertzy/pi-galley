@@ -60,5 +60,9 @@
     "@types/node": "26.6.5",
     "markdownlint-cli2": "0.23.3",
     "typescript": "7.0.2"
+  },
+  "overrides": {
+    "katex": "0.18.2",
+    "smol-toml": "1.9.0"
   }
 }
