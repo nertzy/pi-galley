@@ -18,17 +18,17 @@ Restart Pi, or run `/reload` in existing sessions.
 
 ## Settings
 
-| Command | Effect |
-| --- | --- |
-| `/galley 100` | Set the measure in cells (20 or more). |
-| `/galley off` | Turn the galley off; everything runs full width. |
-| `/galley left` | Set the galley flush left (ragged right). |
-| `/galley center` | Center the galley. |
-| `/galley tools full` | Run tool calls and `!` command output full width. |
-| `/galley input full` | Run the input editor full width. |
-| `/galley footer full` | Run the footer full width. |
+| Command                | Effect                                                        |
+| ---------------------- | ------------------------------------------------------------- |
+| `/galley 100`          | Set the measure in cells (20 or more).                        |
+| `/galley off`          | Turn the galley off; everything runs full width.              |
+| `/galley left`         | Set the galley flush left (ragged right).                     |
+| `/galley center`       | Center the galley.                                            |
+| `/galley tools full`   | Run tool calls and `!` command output full width.             |
+| `/galley input full`   | Run the input editor full width.                              |
+| `/galley footer full`  | Run the footer full width.                                    |
 | `/galley tools column` | Set tool output in the galley. Same for `input` and `footer`. |
-| `/galley` | Show the current settings. |
+| `/galley`              | Show the current settings.                                    |
 
 Defaults: a 120-cell measure, flush left, with tool output, input, and footer
 full width. Commands save to `pi-galley.json` in Pi's agent directory
@@ -36,13 +36,13 @@ full width. Commands save to `pi-galley.json` in Pi's agent directory
 
 Environment variables override the saved settings for one launch:
 
-| Variable | Values |
-| --- | --- |
+| Variable            | Values                                    |
+| ------------------- | ----------------------------------------- |
 | `PI_GALLEY_MEASURE` | `0` (off) or a whole number of 20 or more |
-| `PI_GALLEY_ALIGN` | `left` or `center` |
-| `PI_GALLEY_TOOLS` | `full` or `column` |
-| `PI_GALLEY_INPUT` | `full` or `column` |
-| `PI_GALLEY_FOOTER` | `full` or `column` |
+| `PI_GALLEY_ALIGN`   | `left` or `center`                        |
+| `PI_GALLEY_TOOLS`   | `full` or `column`                        |
+| `PI_GALLEY_INPUT`   | `full` or `column`                        |
+| `PI_GALLEY_FOOTER`  | `full` or `column`                        |
 
 ## Wide diagrams
 
