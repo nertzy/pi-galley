@@ -4,6 +4,8 @@ Notable changes to `pi-galley` are documented here.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-11
+
 ### Fixed
 
 - Fixed wide Mermaid diagrams staying in the galley, with a warning at session start, on Pi 1.5.1 and later, which renders them with `lovely-mermaid` instead of `grok-mermaid`. Earlier Pi versions keep working.
