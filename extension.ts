@@ -262,17 +262,31 @@ function indent(lines: string[], pad: number): string[] {
 
 // ---------- Mermaid breakout ----------
 
-let renderMermaid: ((src: string) => { width: number } | undefined) | undefined;
+type MermaidRender = (src: string) => { width: number } | null | undefined;
+
+let renderMermaid: MermaidRender | undefined;
+
+/** Pi's Mermaid renderer by package name, newest first: Pi 1.5.1 moved to lovely-mermaid. */
+const MERMAID_PACKAGES = ["lovely-mermaid", "grok-mermaid"];
 
 async function loadMermaid(): Promise<boolean> {
   if (renderMermaid) return true;
+  let req: NodeJS.Require;
   try {
-    // grok-mermaid is Pi's own dependency; resolve it from Pi's install.
-    const req = createRequire(realpathSync(process.argv[1] ?? ""));
-    const mod = await import(pathToFileURL(req.resolve("grok-mermaid")).href);
-    if (typeof mod.render === "function") renderMermaid = mod.render;
-  } catch {}
-  return !!renderMermaid;
+    // The renderer is Pi's own dependency; resolve it from Pi's install.
+    req = createRequire(realpathSync(process.argv[1] ?? ""));
+  } catch {
+    return false;
+  }
+  for (const name of MERMAID_PACKAGES) {
+    try {
+      const mod = await import(pathToFileURL(req.resolve(name)).href);
+      if (typeof mod.render !== "function") continue;
+      renderMermaid = mod.render;
+      return true;
+    } catch {}
+  }
+  return false;
 }
 
 const artWidths = new Map<string, number>();
@@ -497,7 +511,7 @@ export default function (pi: ExtensionAPI) {
     for (const warning of badEnv) ctx.ui.notify(warning, "warning");
     if (!(await loadMermaid())) {
       ctx.ui.notify(
-        "pi-galley: grok-mermaid not found; wide diagrams stay in the galley",
+        "pi-galley: Pi's Mermaid renderer not found; wide diagrams stay in the galley",
         "warning",
       );
     }
