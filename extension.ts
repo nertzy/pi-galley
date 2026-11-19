@@ -14,6 +14,9 @@ import {
 import {
   type Component,
   Container,
+  getCellDimensions,
+  getPngDimensions,
+  type ImageDimensions,
   Markdown,
   type MarkdownOptions,
   Marked,
@@ -26,7 +29,7 @@ import {
 // centered. Mermaid diagrams wider than the measure "break out" to the width they need
 // (capped at the terminal) so Pi can still render them; surrounding text stays in the
 // galley. Tool output, the input editor and the footer each run full width or sit in
-// the galley.
+// the galley. A tool's renderer can hint how wide the tool's images are drawn.
 //
 //   /galley 120        set the measure (saved)
 //   /galley off        full width (saved)
@@ -195,6 +198,8 @@ const REGION: unique symbol = Symbol.for("pi-galley.region.v1");
 const FULL_WIDTH: unique symbol = Symbol.for("pi-galley.full-width");
 /** A function on globalThis returning the measure in cells, or 0 when the galley is off. */
 const MEASURE: unique symbol = Symbol.for("pi-galley.measure");
+/** Set to "natural" or a positive cell count on a tool's rendered component to size its images. */
+const IMAGE_WIDTH: unique symbol = Symbol.for("pi-galley.image-width");
 
 /** A Pi component plus the bookkeeping this extension attaches to it. */
 interface Hooked extends Component {
@@ -205,6 +210,7 @@ interface Hooked extends Component {
   [REGION_ROOT]?: Region;
   [REGION]?: Region;
   [FULL_WIDTH]?: boolean;
+  [IMAGE_WIDTH]?: unknown;
 }
 
 const published = globalThis as { [MEASURE]?: () => number };
@@ -422,8 +428,8 @@ function regionOf(comp: Hooked): Region | undefined {
 }
 
 /**
- * How deep to look for a FULL_WIDTH mark. A tool renderer's output sits four levels
- * down: tool component, render container, MouseRegion, then the renderer's root.
+ * How deep to look for a mark. A tool renderer's output sits four levels down: tool
+ * component, render container, MouseRegion, then the renderer's root.
  */
 const MARK_DEPTH = 6;
 
@@ -431,13 +437,23 @@ const MARK_DEPTH = 6;
 const innerOf = (comp: Hooked): Hooked[] =>
   comp.child ? [comp.child] : (comp.children ?? []);
 
-function isMarkedFullWidth(comp: Hooked, depth = MARK_DEPTH): boolean {
-  return (
-    comp[FULL_WIDTH] === true ||
-    (depth > 0 &&
-      innerOf(comp).some((inner) => isMarkedFullWidth(inner, depth - 1)))
-  );
+/** The first mark `read` finds on a component or, depth first, on those it holds. */
+function findMark<T>(
+  comp: Hooked,
+  read: (comp: Hooked) => T | undefined,
+  depth = MARK_DEPTH,
+): T | undefined {
+  const mark = read(comp);
+  if (mark !== undefined || depth <= 0) return mark;
+  for (const inner of innerOf(comp)) {
+    const found = findMark(inner, read, depth - 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
 }
+
+const isMarkedFullWidth = (comp: Hooked): boolean =>
+  findMark(comp, (inner) => inner[FULL_WIDTH] === true || undefined) === true;
 
 function isFullWidth(comp: Hooked): boolean {
   const region = regionOf(comp);
@@ -445,6 +461,110 @@ function isFullWidth(comp: Hooked): boolean {
     (region !== undefined && config[region] === "full") ||
     isMarkedFullWidth(comp)
   );
+}
+
+// ---------- Tool image width ----------
+
+type ImageWidth = "natural" | number;
+
+/** A component's IMAGE_WIDTH mark; anything but "natural" or a positive number is no hint. */
+function imageWidthOf(comp: Hooked): ImageWidth | undefined {
+  const hint = comp[IMAGE_WIDTH];
+  return hint === "natural" || (typeof hint === "number" && hint > 0)
+    ? hint
+    : undefined;
+}
+
+/** The limits Pi's Image scales to fit. Pi sets the width and leaves the height to a default. */
+type ImageSize = { maxWidthCells?: number; maxHeightCells?: number };
+
+/** Private fields of Pi's Image, and of the tool block that draws its images, read to size each one. */
+interface ImageFields {
+  dimensions?: ImageDimensions;
+  /** The PNG Pi converted the image to for a Kitty terminal, base64, once it has drawn it. */
+  pngData?: string;
+  options?: ImageSize;
+  invalidate(): void;
+}
+interface ToolFields {
+  imageComponents?: ImageFields[];
+}
+
+/** The limits Pi gave each image that now follows a hint, put back when the hint goes. */
+const piSizes = new WeakMap<ImageFields, ImageSize>();
+
+/**
+ * One image pixel per terminal pixel, rounded down to whole cells so the image shrinks
+ * rather than grows. Only an image narrower than one cell grows, to the one cell that is
+ * the least Pi draws. The height limit rises to fit: Pi's default would shrink a tall
+ * image into a box as high as it is wide.
+ */
+function naturalSize({ widthPx, heightPx }: ImageDimensions): ImageSize {
+  const cell = getCellDimensions();
+  return {
+    maxWidthCells: Math.max(1, Math.floor(widthPx / cell.widthPx)),
+    maxHeightCells: Math.max(1, Math.ceil(heightPx / cell.heightPx)),
+  };
+}
+
+/** A PNG's size is in its first 24 bytes, 32 characters of base64: enough to read, cheap to decode. */
+const PNG_HEADER = 32;
+
+/**
+ * The pixel size Pi draws an image at. Converting an image to PNG applies its EXIF
+ * rotation, so a photo stored on its side is drawn with width and height swapped.
+ */
+const drawnSize = ({ dimensions, pngData }: ImageFields) =>
+  (pngData && getPngDimensions(pngData.slice(0, PNG_HEADER))) || dimensions;
+
+/**
+ * Size a tool's images as its renderer hints, and say whether any size changed. Each
+ * image is sized on its own: the one width Pi keeps per tool would scale a small image
+ * up to match a wide one. Pi's Image then stops two cells short of the width its block
+ * renders at, as it always does.
+ */
+function sizeImages(comp: Hooked): boolean {
+  const images = (comp as ToolFields).imageComponents;
+  if (!Array.isArray(images) || !images.length) return false;
+  const hint = findMark(comp, imageWidthOf);
+  let changed = false;
+  for (const image of images) {
+    const dimensions = drawnSize(image);
+    const { options } = image;
+    const saved = piSizes.get(image);
+    if (!dimensions || !options || (hint === undefined && !saved)) continue;
+    const { maxWidthCells, maxHeightCells } = options;
+    const pi = saved ?? { maxWidthCells, maxHeightCells };
+    const size =
+      hint === undefined
+        ? pi
+        : hint === "natural"
+          ? naturalSize(dimensions)
+          : { ...pi, maxWidthCells: hint };
+    if (hint === undefined) piSizes.delete(image);
+    else piSizes.set(image, pi);
+    if (
+      size.maxWidthCells === maxWidthCells &&
+      size.maxHeightCells === maxHeightCells
+    )
+      continue;
+    options.maxWidthCells = size.maxWidthCells;
+    options.maxHeightCells = size.maxHeightCells;
+    image.invalidate(); // drop the lines cached for the old size
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Render a tool block with its images sized. Pi converts an image as it draws it, so
+ * the size an image is drawn at can first show during the render: size again, and
+ * render again when that resized an image.
+ */
+function renderSized(comp: Hooked, render: () => string[]): string[] {
+  sizeImages(comp);
+  const lines = render();
+  return sizeImages(comp) ? render() : lines;
 }
 
 /** Pi's renderers expose the focused component; the TUI interface does not declare it. */
@@ -483,9 +603,13 @@ const impl: Impl = {
       const lines = renderSplit(comp, width);
       if (lines) return lines;
     }
-    if (isFullWidth(comp)) return render(width);
+    const sized =
+      comp instanceof ToolExecutionComponent
+        ? (w: number) => renderSized(comp, () => render(w))
+        : render;
+    if (isFullWidth(comp)) return sized(width);
     const { w, pad } = column(width);
-    return indent(render(w), pad);
+    return indent(sized(w), pad);
   },
   handleMouse(comp, event, handleMouse) {
     if (isWalked(comp) || isFullWidth(comp)) return handleMouse(event);

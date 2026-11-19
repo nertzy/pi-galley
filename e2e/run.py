@@ -11,6 +11,9 @@ stays inside the column (centered or flush left), except the rows of the one wid
 diagram that is allowed to break out. Region scenarios then check that tool output,
 the input editor and the footer run full width when asked.
 
+Image scenarios force Kitty graphics, report a cell size as a terminal would, and
+read each image's placed columns and rows from the bytes Pi wrote.
+
 Artifacts (overwritten each run): e2e/artifacts/<scenario>/{screen-*.txt,pty.log,
 session.jsonl,settings.json} and e2e/artifacts/report.json.
 Run via e2e/run.sh (sets up pyte).
@@ -18,10 +21,12 @@ Run via e2e/run.sh (sets up pyte).
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -31,6 +36,7 @@ import tempfile
 import termios
 import time
 import uuid
+import zlib
 
 import pyte
 
@@ -39,6 +45,8 @@ EXTENSION = os.path.join(HERE, "..", "extension.ts")
 MARKED_EXTENSION = os.path.join(HERE, "marked-message.ts")
 FIXTURE = open(os.path.join(HERE, "fixture.md")).read()
 ARTIFACTS = os.path.join(HERE, "artifacts")
+# A JPEG stored 200x100 px whose EXIF orientation turns it a quarter turn, so Pi draws it 100x200.
+ROTATED_JPEG, ROTATED = os.path.join(HERE, "rotated.jpg"), (100, 200)
 PAD_X = 1  # Pi's default outputPad: assistant text starts one cell inside the column
 WIDE_DIAGRAM = "Request received"
 TOOL_LINE = "TOOLWIDE " + " ".join(f"word{i:02d}" for i in range(30))  # wider than the column
@@ -50,9 +58,18 @@ IN_GALLEY = {"PI_GALLEY_TOOLS": "column", "PI_GALLEY_INPUT": "column", "PI_GALLE
 # ---------------------------------------------------------------- pi driver
 
 
+APC = re.compile(rb"\x1b_.*?\x1b\\", re.S)  # Kitty graphics commands; pyte would print their payload
+KITTY = re.compile(rb"\x1b_G([^;\x1b]*)(?:;([^\x1b]*))?\x1b\\")
+CELL_SIZE_QUERY = b"\x1b[16t"
+
+
 class Pi:
-    def __init__(self, out_dir: str, agent_dir: str, session: str, cols: int, rows: int, env: dict):
+    def __init__(self, out_dir: str, agent_dir: str, session: str, cols: int, rows: int, env: dict,
+                 cell: tuple[int, int] | None = None):
         self.out_dir, self.cols, self.rows = out_dir, cols, rows
+        self.cell = cell  # (width, height) of a cell in pixels, reported when Pi asks
+        self.output = b""  # everything Pi wrote
+        self.held = b""  # the start of a graphics command still arriving
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
         self.log = open(os.path.join(out_dir, "pty.log"), "wb")
@@ -82,7 +99,16 @@ class Pi:
             if not data:
                 return
             self.log.write(data)
-            self.stream.feed(data)
+            self.output += data
+            # The query may straddle two reads; the bytes kept from the last one are too few to hold it whole.
+            if self.cell and CELL_SIZE_QUERY in self.output[-len(data) - len(CELL_SIZE_QUERY) + 1:]:
+                os.write(self.fd, b"\x1b[6;%d;%dt" % (self.cell[1], self.cell[0]))
+            data = APC.sub(b"", self.held + data)
+            cut = data.rfind(b"\x1b_")
+            if cut < 0:
+                cut = len(data) - data.endswith(b"\x1b")
+            self.held = data[cut:]
+            self.stream.feed(data[:cut])
 
     def wait_for(self, predicate, timeout: float = 30) -> bool:
         end = time.time() + timeout
@@ -131,7 +157,26 @@ def make_agent_dir(root: str, tui_mode: str, mermaid: str) -> str:
     return agent
 
 
-def make_session(root: str, tool_call: bool = False, marked: bool = False) -> str:
+def png(width: int, height: int) -> str:
+    """A solid-color PNG of that pixel size, base64-encoded."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+    pixels = zlib.compress((b"\0" + b"\x30\x60\x90" * width) * height)
+    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")).decode()
+
+
+def image(size: tuple[int, int]) -> dict:
+    """The image block Pi draws at that pixel size: the rotated JPEG for its size, else a PNG."""
+    if size == ROTATED:
+        with open(ROTATED_JPEG, "rb") as f:
+            return {"type": "image", "data": base64.b64encode(f.read()).decode(), "mimeType": "image/jpeg"}
+    return {"type": "image", "data": png(*size), "mimeType": "image/png"}
+
+
+def make_session(root: str, tool_call: bool = False, marked: bool = False, image_calls=()) -> str:
     work = os.path.join(root, "work")
     os.makedirs(work, exist_ok=True)
     now_ms = int(time.time() * 1000)
@@ -167,6 +212,19 @@ def make_session(root: str, tool_call: bool = False, marked: bool = False) -> st
                             "timestamp": iso, "message": message})
         entries.append({"type": "custom_message", "id": "marked01", "parentId": entries[-1]["id"], "timestamp": iso,
                         "customType": "galley-e2e", "content": "marked", "display": True})
+    # Tool calls whose results hold images; the renderer hints their width (e2e/marked-message.ts).
+    for n, (arguments, sizes) in enumerate(image_calls):
+        call = [
+            {"role": "assistant", "content": [{"type": "toolCall", "id": f"toolu_image{n}", "name": "galley_e2e_image",
+                                               "arguments": arguments}],
+             **model, "stopReason": "toolUse", "timestamp": now_ms},
+            {"role": "toolResult", "toolCallId": f"toolu_image{n}", "toolName": "galley_e2e_image",
+             "content": [image(size) for size in sizes],
+             "isError": False, "timestamp": now_ms},
+        ]
+        for message in call:
+            entries.append({"type": "message", "id": f"i{len(entries):07d}", "parentId": entries[-1]["id"],
+                            "timestamp": iso, "message": message})
     path = os.path.join(work, "session.jsonl")
     with open(path, "w") as f:
         f.write("".join(json.dumps(e) + "\n" for e in entries))
@@ -264,16 +322,16 @@ def at_width(cols, max_width, align="center"):
 
 
 def scenario(name, *, cols=260, rows=110, tui="fullscreen", mermaid="streaming", env=None, root=None, tool_call=False,
-             marked=False):
+             marked=False, image_calls=(), cell=None):
     out = os.path.join(ARTIFACTS, name)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out)
     root = root or tempfile.mkdtemp(prefix=f"galley-{name}-")
     agent = make_agent_dir(root, tui, mermaid)
-    session = make_session(root, tool_call, marked)
+    session = make_session(root, tool_call, marked, image_calls)
     shutil.copy(session, os.path.join(out, "session.jsonl"))
     shutil.copy(os.path.join(agent, "settings.json"), os.path.join(out, "settings.json"))
-    return Pi(out, agent, session, cols, rows, env or {}), root, agent
+    return Pi(out, agent, session, cols, rows, env or {}, cell), root, agent
 
 
 def run_layout(name, *, max_width, expect_breakout, align="center", **kw):
@@ -520,6 +578,68 @@ def run_marked(name, *, measure, then=None):
         pi.close()
 
 
+def placed_images(output: bytes) -> dict[tuple[int, int], list[tuple[int, int]]]:
+    """Every placement of each image, oldest first: {(width px, height px): [(columns, rows), ...]}."""
+    sizes, placed = {}, {}
+    for match in KITTY.finditer(output):
+        controls = dict(pair.split(b"=", 1) for pair in match[1].split(b",") if b"=" in pair)
+        image = controls.get(b"i")
+        if controls.get(b"a") == b"T" and match[2]:  # a transmission opens with the PNG header
+            sizes[image] = struct.unpack(">II", base64.b64decode(match[2][:32])[16:24])
+        if b"c" in controls and b"r" in controls:
+            placed.setdefault(image, []).append((int(controls[b"c"]), int(controls[b"r"])))
+    return {sizes[image]: cells for image, cells in placed.items() if image in sizes}
+
+
+def run_image_width():
+    """Tool images follow the renderer's image-width hint, and Pi's setting again once the hint goes."""
+    measure, cell = 100, (10, 20)
+    pi_width = 60  # Pi's terminal.imageWidthCells default: every image scaled to fit 60 cells
+    wide, small, tall = (2000, 100), (150, 40), (200, 800)
+    calls = [  # (renderer arguments, image sizes, expected (columns, rows) per image; None = any rows)
+        ({"label": "column", "width": "natural"}, [wide], [(measure - 2, None)]),  # stops at its block, the galley
+        ({"label": "full", "width": "natural", "fullWidth": True}, [(2010, 100), small], [(201, 5), (15, 2)]),
+        ({"label": "tall", "width": "natural"}, [tall], [(20, 40)]),
+        ({"label": "rotated", "width": "natural"}, [ROTATED], [(10, 10)]),  # sized as drawn, not as stored
+        # Pi places images on whole cells: the width rounds down, and less than one cell still takes one.
+        ({"label": "cells", "width": "natural"}, [(205, 95), (5, 5)], [(20, 5), (1, 1)]),
+        ({"label": "cap", "width": 30}, [(2020, 100), (160, 40)], [(30, None), (30, None)]),
+        ({"label": "bogus", "width": "wide"}, [(2030, 100)], [(pi_width, None)]),
+        ({"label": "plain"}, [(2040, 100), (170, 40)], [(pi_width, None), (pi_width, None)]),
+    ]
+    hinted = {size: cells for _, sizes, expected in calls for size, cells in zip(sizes, expected)}
+    unhinted = {size: (pi_width, None) for size in hinted} | {tall: (15, 30), ROTATED: (30, 30)}  # Pi fits a square box
+    env = {"PI_IMAGE_PROTOCOL": "kitty", "PI_GALLEY_MEASURE": str(measure), "PI_GALLEY_ALIGN": "center",
+           "PI_GALLEY_TOOLS": "column"}
+    pi, _, _ = scenario("image-width", rows=220, env=env, cell=cell,
+                        image_calls=[(arguments, sizes) for arguments, sizes, _ in calls])
+
+    def check(expected):
+        placed = {size: cells[-1] for size, cells in placed_images(pi.output).items()}
+        errors = [f"image {size[0]}x{size[1]} px placed at {placed.get(size)}, expected {cells} (columns, rows)"
+                  for size, cells in expected.items()
+                  if size not in placed or any(want not in (None, got) for want, got in zip(cells, placed[size]))]
+        return errors + [f"unexpected image {size}" for size in placed.keys() - expected.keys()]
+
+    try:
+        if not pi.wait_for(lambda lines: any("IMAGE-plain" in line for line in lines)):
+            pi.save("timeout")
+            return ["pi never showed the image tool calls"]
+        pi.wait_for(lambda _: not check(hinted), timeout=10)
+        pi.save("1-hinted")
+        errors = check(hinted)
+        # Pi converts the JPEG as it first draws it, so the size it is drawn at shows mid-render.
+        # No frame may shrink it, as sizing it from the stored 200x100 would.
+        errors += [f"rotated image drawn {cells} (columns, rows), below its natural size"
+                   for cells in placed_images(pi.output).get(ROTATED, []) if cells[0] < hinted[ROTATED][0]]
+        pi.send("/galley-e2e-hints off\r")
+        pi.wait_for(lambda _: not check(unhinted), timeout=10)
+        pi.save("2-hints-off")
+        return errors + [f"after the hints go: {e}" for e in check(unhinted)]
+    finally:
+        pi.close()
+
+
 def run_defaults():
     """No settings at all: measure 120, flush left, tool output, input and footer full width."""
     pi, _, _ = scenario("defaults", tool_call=True)
@@ -564,6 +684,7 @@ def main() -> int:
     results["regions-column-then-full"] = run_regions(
         "regions-column-then-full", input_at="column", footer_at="column", then=(("input", "full"), ("footer", "full")))
     results["marked-full-width"] = run_marked("marked-full-width", measure=100, then=80)
+    results["image-width"] = run_image_width()
     results["mermaid-off-100"] = run_layout("mermaid-off-100", max_width=100, expect_breakout=False, mermaid="off")
     results["narrow-terminal-90"] = run_layout("narrow-terminal-90", max_width=100, expect_breakout=False, cols=90)
     errors, root = run_live_change_and_reload()

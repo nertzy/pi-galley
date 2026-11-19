@@ -51,7 +51,7 @@ Pi can still draw them. The prose around them stays in the galley.
 
 ## For extension authors
 
-Extensions can cooperate with pi-galley without depending on it. Both hooks
+Extensions can cooperate with pi-galley without depending on it. The hooks
 use global symbols, so they do nothing when pi-galley is not installed.
 
 - Set `component[Symbol.for("pi-galley.full-width")] = true` on a component
@@ -60,9 +60,24 @@ use global symbols, so they do nothing when pi-galley is not installed.
 - Call `globalThis[Symbol.for("pi-galley.measure")]?.()` at render time for the
   current measure in cells. It returns `0` when the galley is off, and the
   function is absent when pi-galley is not loaded.
+- Set `component[Symbol.for("pi-galley.image-width")]` on a component your
+  tool's `renderCall` or `renderResult` returns, to size the images Pi draws
+  below that tool's block:
+  - `"natural"` draws each image at its own size: one image pixel per terminal
+    pixel, from the cell size the terminal reports. Pi places images on whole
+    cells, so the image shrinks to fit a whole number of them rather than
+    growing. The exception is an image narrower than one cell, which is drawn
+    one cell wide. The image shrinks further only to fit its block.
+  - A positive number caps the width at that many cells, with Pi's usual
+    scaling.
 
-A chat-style extension can combine the two: run its block full width, cap its
-bubbles at the measure, and put them against the left and right edges.
+  An image never runs wider than its tool's block. Under `/galley tools column`
+  the block sits in the galley, so add the full-width mark to give the images
+  the whole terminal. Without the hint, Pi's `terminal.imageWidthCells` setting
+  applies.
+
+A chat-style extension can combine the first two: run its block full width, cap
+its bubbles at the measure, and put them against the left and right edges.
 
 ## Scope and limitations
 
