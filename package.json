@@ -1,6 +1,6 @@
 {
   "name": "pi-galley",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Set Pi's chat in a readable measure on wide terminals, with tool output, input, and footer free to run full width",
   "type": "module",
   "license": "MIT",

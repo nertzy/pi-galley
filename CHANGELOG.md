@@ -4,6 +4,8 @@ Notable changes to `pi-galley` are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Added
 
 - Added a global symbol that lets a tool hint how wide its images are drawn: at their natural size, or capped at a number of cells.
